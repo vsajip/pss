@@ -13,7 +13,7 @@ import optparse
 
 
 from psslib import __version__
-from psslib.driver import (pss_run, TYPE_MAP,
+from psslib.driver import (pss_run, TYPE_MAP, TypeSpec,
         IGNORED_DIRS, IGNORED_FILE_PATTERNS, PssOnlyFindFilesOption)
 
 def _merge_configuration(argv):
@@ -25,6 +25,31 @@ def _merge_configuration(argv):
             if lines:
                 result = [result[0]] + lines + result[1:]
     return result
+
+def _handle_typespecs(options, optparser):
+    # Handle --type-set and --type-add, which modify driver.TYPE_MAP
+    #
+    type_sets = (options.type_sets or [])
+    type_specs = type_sets + (options.type_additions or [])
+    for spec in type_specs:
+        if '=' not in spec:
+            optparser.error('argument must be in TYPE=PATTERN format')
+
+        typ, pattern = spec.split('=', 1)
+        if spec in type_sets:
+            # It's a --type-set, replace existing type definition
+            TYPE_MAP[typ] = TypeSpec([], [])
+        if typ not in TYPE_MAP:
+            optparser.error('type %r not found, use --type-set' % typ)
+
+        if not pattern.startswith('.'):
+            TYPE_MAP[typ].patterns.append(pattern)
+        else:
+            for extension in pattern.split(','):
+                if not extension.startswith('.'):
+                    optparser.error('extension must be in .EXT format')
+                TYPE_MAP[typ].extensions.append(extension)
+
 
 def main(argv=sys.argv, output_formatter=None):
     """ Main pss
@@ -47,6 +72,8 @@ def main(argv=sys.argv, output_formatter=None):
         return 0
     except SystemExit:
         return 2
+
+    _handle_typespecs(options, optparser)
 
     # Handle the various "only find files" options.
     #
@@ -344,6 +371,14 @@ def parse_cmdline(cmdline_args):
     group_inclusion.add_option('-G',
         action='store', dest='type_pattern', metavar='REGEX',
         help='Only search files that match REGEX')
+    group_inclusion.add_option('--type-set',
+        action='append', dest='type_sets', metavar='TYPE=PATTERN',
+        help='''Set TYPE spec to files that match given PATTERN (which can be
+a regex, or a comma-separated list of file extensions including the dot)''')
+    group_inclusion.add_option('--type-add',
+        action='append', dest='type_additions', metavar='TYPE=PATTERN',
+        help='''Add to TYPE spec files that match given PATTERN (as above, but
+doesn't replace existing TYPE spec)''')
     optparser.add_option_group(group_inclusion)
 
     # Parsing --<type> and --no<type> options for all supported types is

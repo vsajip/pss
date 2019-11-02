@@ -43,7 +43,7 @@ def main(argv=sys.argv, output_formatter=None):
     argv = _merge_configuration(argv)
     try:
         options, args, optparser = parse_cmdline(argv[1:])
-    except VersionPrinted:
+    except HelpOrVersionPrinted:
         return 0
     except SystemExit:
         return 2
@@ -57,10 +57,10 @@ def main(argv=sys.argv, output_formatter=None):
     if options.find_files:
         only_find_files = True
         search_pattern_expected = False
-    elif options.find_files_matching_pattern is not None:
+    elif options.find_files_matching_patterns:
         only_find_files = True
         search_pattern_expected = False
-        options.type_pattern = options.find_files_matching_pattern
+        options.include_patterns = options.find_files_matching_patterns
     elif options.find_files_with_matches:
         only_find_files = True
         only_find_files_option = PssOnlyFindFilesOption.FILES_WITH_MATCHES
@@ -81,8 +81,11 @@ def main(argv=sys.argv, output_formatter=None):
     elif options.show_type_list:
         show_type_list()
         return 0
-    elif (len(args) == 0 and search_pattern_expected) or options.help:
-        optparser.print_help()
+    elif len(args) == 0 and search_pattern_expected:
+        try:
+            optparser.print_help()
+        except HelpOrVersionPrinted:
+            pass
         print(DESCRIPTION_AFTER_USAGE)
         return 0
 
@@ -135,7 +138,8 @@ def main(argv=sys.argv, output_formatter=None):
                 remove_ignored_dirs=remove_ignored_dirs,
                 recurse=options.recurse,
                 textonly=options.textonly,
-                type_pattern=options.type_pattern,
+                include_patterns=options.include_patterns,
+                exclude_patterns=options.exclude_patterns,
                 include_types=include_types,
                 exclude_types=exclude_types,
                 ignore_case=options.ignore_case,
@@ -151,7 +155,9 @@ def main(argv=sys.argv, output_formatter=None):
                 do_break=options.do_break,
                 do_heading=options.do_heading,
                 prefix_filename_to_file_matches=options.prefix_filename,
+                show_line_of_match=options.show_line,
                 show_column_of_first_match=options.show_column,
+                universal_newlines=options.universal_newlines,
                 ncontext_before=ncontext_before,
                 ncontext_after=ncontext_after)
     except KeyboardInterrupt:
@@ -181,8 +187,8 @@ Run with --help-types for more help on how to select file types.
 
 def _ignored_dirs_as_string():
     s = ['    ']
-    for i, dir in enumerate(IGNORED_DIRS):
-        s.append('%-9s' % dir)
+    for i, dir in enumerate(sorted(IGNORED_DIRS)):
+        s.append('%-13s' % dir)
         if i % 4 == 3:
             s.append('\n    ')
     return ' '.join(s)
@@ -217,15 +223,11 @@ def parse_cmdline(cmdline_args):
         usage='usage: %prog [options] <pattern> [files]',
         description=DESCRIPTION,
         prog='pss',
-        add_help_option=False,  # -h is a real option
         version='pss %s' % __version__)
 
     optparser.add_option('--help-types',
         action='store_true', dest='help_types',
         help='Display supported file types')
-    optparser.add_option('--help',
-        action='store_true', dest='help',
-        help='Display this information')
 
     # This option is for internal usage by the bash completer, so we're hiding
     # it from the --help output
@@ -250,6 +252,9 @@ def parse_cmdline(cmdline_args):
     group_searching.add_option('-Q', '--literal',
         action='store_true', dest='literal', default=False,
         help='Quote all metacharacters; the pattern is literal')
+    group_searching.add_option('-U', '--universal-newlines',
+        action='store_true', dest='universal_newlines', default=False,
+        help='Use PEP 278 universal newline support when opening files')
     optparser.add_option_group(group_searching)
 
     group_output = optparse.OptionGroup(optparser, 'Search output')
@@ -259,18 +264,27 @@ def parse_cmdline(cmdline_args):
     group_output.add_option('-m', '--max-count',
         action='store', dest='max_count', metavar='NUM', default=sys.maxsize,
         type='int', help='Stop searching in each file after NUM matches')
-    group_output.add_option('-H', '--with-filename',
+    group_output.add_option('--with-filename',
         action='store_true', dest='prefix_filename', default=True,
         help=' '.join(r'''Print the filename before matches (default). If
         --noheading is specified, the filename will be prepended to each
         matching line. Otherwise it is printed once for all the matches
         in the file.'''.split()))
-    group_output.add_option('-h', '--no-filename',
+    group_output.add_option('--no-filename',
         action='store_false', dest='prefix_filename',
         help='Suppress printing the filename before matches')
+    group_output.add_option('--line',
+        action='store_true', dest='show_line', default=True,
+        help='Print the line number before matches (default)')
+    group_output.add_option('--noline',
+        action='store_false', dest='show_line',
+        help='Suppress printing the line number before matches')
     group_output.add_option('--column',
         action='store_true', dest='show_column',
         help='Show the column number of the first match')
+    group_output.add_option('--nocolumn',
+        action='store_false', dest='show_column',
+        help='Suppress showing the column number of the first match (default)')
     group_output.add_option('-A', '--after-context',
         action='store', dest='after_context', metavar='NUM', default=0,
         type='int', help='Print NUM lines of context after each match')
@@ -308,7 +322,8 @@ def parse_cmdline(cmdline_args):
         action='store_true', dest='find_files',
         help='Only print the names of found files. The pattern must not be specified')
     group_filefinding.add_option('-g',
-        action='store', dest='find_files_matching_pattern', metavar='REGEX',
+        action='append', dest='find_files_matching_patterns',
+        metavar='REGEX', default=[],
         help='Same as -f, but only print files matching REGEX')
     group_filefinding.add_option('-l', '--files-with-matches',
         action='store_true', dest='find_files_with_matches',
@@ -341,9 +356,12 @@ def parse_cmdline(cmdline_args):
         action='store_true', dest='textonly', default=False,
         help='''Restrict the search to only textual files.
         Warning: with this option the search is likely to run much slower''')
-    group_inclusion.add_option('-G',
-        action='store', dest='type_pattern', metavar='REGEX',
+    group_inclusion.add_option('-G', '--include-pattern',
+        action='append', dest='include_patterns', metavar='REGEX', default=[],
         help='Only search files that match REGEX')
+    group_inclusion.add_option('--exclude-pattern',
+        action='append', dest='exclude_patterns', metavar='REGEX', default=[],
+        help='Exclude files that match REGEX')
     optparser.add_option_group(group_inclusion)
 
     # Parsing --<type> and --no<type> options for all supported types is
@@ -407,17 +425,21 @@ def _splice_comma_names(namelist):
 
 
 class PssOptionParser(optparse.OptionParser):
-    """Option parser that separates using --version from using invalid options.
+    """Option parser that separates using --help and --version from
+       using invalid options.
 
        By default optparse uses SystemExit with both. This parser uses custom
-       VersionPrinted exception with --version.
+       HelpOrVersionPrinted exception with --help and --version.
     """
-
     def print_version(self, file=None):
         optparse.OptionParser.print_version(self, file)
-        raise VersionPrinted()
+        raise HelpOrVersionPrinted()
+
+    def print_help(self):
+        optparse.OptionParser.print_help(self)
+        print(DESCRIPTION_AFTER_USAGE)
+        raise HelpOrVersionPrinted()
 
 
-class VersionPrinted(Exception):
+class HelpOrVersionPrinted(Exception):
     pass
-

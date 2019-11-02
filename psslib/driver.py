@@ -7,13 +7,10 @@
 # This code is in the public domain
 #-------------------------------------------------------------------------------
 import collections
-import os
-import re
 import sys
 
 from .filefinder import FileFinder
 from .contentmatcher import ContentMatcher
-from .matchresult import MatchResult
 from .defaultpssoutputformatter import DefaultPssOutputFormatter
 from .utils import istextfile
 from .py3compat import str2bytes
@@ -25,16 +22,22 @@ TYPE_MAP = {
         TypeSpec(['.as', '.mxml'], []),
     'ada':
         TypeSpec(['.ada', '.adb', '.ads'], []),
-    'batch':
-        TypeSpec(['.bat', '.cmd'], []),
     'asm':
         TypeSpec(['.asm', '.s', '.S'], []),
+    'batch':
+        TypeSpec(['.bat', '.cmd'], []),
+    'bazel':
+        TypeSpec(['.bzl'], ['BUILD']),
     'cc':
         TypeSpec(['.c', '.h', '.xs'], []),
     'cfg':
         TypeSpec(['.cfg', '.conf', '.config'], []),
     'cfmx':
         TypeSpec(['.cfc', '.cfm', '.cfml'], []),
+    'clj':
+        TypeSpec(['.clj'], []),
+    'clojure':
+        TypeSpec(['.clj'], []),
     'cmake':
         TypeSpec(['.cmake'], ['CMake(Lists|Funcs).txt']),
     'cpp':
@@ -42,11 +45,15 @@ TYPE_MAP = {
     'csharp':
         TypeSpec(['.cs'], []),
     'css':
-        TypeSpec(['.css', '.less'], []),
+        TypeSpec(['.css', '.less', '.scss'], []),
     'cuda':
         TypeSpec(['.cu'], []),
     'cython':
         TypeSpec(['.pyx', '.pxd', '.pyxbld'], []),
+    'dart':
+        TypeSpec(['.dart'], []),
+    'docker':
+        TypeSpec([], ['Dockerfile', 'Dockerfile\.(\w+)']),
     'elisp':
         TypeSpec(['.el', '.elisp'], []),
     'erlang':
@@ -55,7 +62,11 @@ TYPE_MAP = {
         TypeSpec(['.f', '.f77', '.f90', '.F90', '.f95', '.F95', '.f03', '.for', '.ftn', '.fpp'], []),
     'go':
         TypeSpec(['.go'], []),
+    'gomod':
+        TypeSpec([], ['go\.mod']),
     'haskell':
+        TypeSpec(['.hs', '.lhs'], []),
+    'hs':
         TypeSpec(['.hs', '.lhs'], []),
     'hh':
         TypeSpec(['.h'], []),
@@ -65,8 +76,10 @@ TYPE_MAP = {
         TypeSpec(['.inc', '.inl'], []),
     'java':
         TypeSpec(['.java', '.properties'], []),
+    'jinja2':
+        TypeSpec(['.j2'], []),
     'js':
-        TypeSpec(['.js'], []),
+        TypeSpec(['.js', '.jsx'], []),
     'json':
         TypeSpec(['.json'], []),
     'jsp':
@@ -83,6 +96,8 @@ TYPE_MAP = {
         TypeSpec(['.mk'], ['[Mm]akefile']),
     'mason':
         TypeSpec(['.mas', '.mthml', '.mpl', '.mtxt'], []),
+    'md':
+        TypeSpec(['.md'], []),
     'objc':
         TypeSpec(['.m', '.h'], []),
     'objcpp':
@@ -99,10 +114,14 @@ TYPE_MAP = {
         TypeSpec(['.php', '.phpt', '.php3', '.php4', '.php5', '.phtml'], []),
     'plone':
         TypeSpec(['.pt', '.cpt', '.metadata', '.cpy', '.py'], []),
+    'proto':
+        TypeSpec(['.proto'], []),
     'py':
         TypeSpec(['.py', '.pyw'], []),
     'python':
         TypeSpec(['.py', '.pyw'], []),
+    'r':
+        TypeSpec(['.R', '.Rmd'], []),
     'rake':
         TypeSpec([], ['[Rr]akefile']),
     'rst':
@@ -129,12 +148,18 @@ TYPE_MAP = {
         TypeSpec(['.tck', '.itcl', '.itk'], []),
     'td':  # short-name for --tablegen
         TypeSpec(['.td'], []),
+    'terraform':
+        TypeSpec(['.tf', '.tfvars', '.hcl', '.tfstate'], []),
     'tex':
         TypeSpec(['.tex', '.cls', '.sty'], []),
+    'toml':
+        TypeSpec(['.toml'], []),
     'tt':
         TypeSpec(['.tt', '.tt2', '.ttml'], []),
     'txt':
         TypeSpec(['.txt', '.text'], []),
+    'typescript':
+        TypeSpec(['.ts', '.tsx'], []),
     'vb':
         TypeSpec(['.bas', '.cls', '.frm', '.ctl', '.vb', '.resx'], []),
     'verilog':
@@ -151,13 +176,14 @@ TYPE_MAP = {
         TypeSpec(['.yaml', '.yml'], []),
 }
 
-IGNORED_DIRS = set([
+IGNORED_DIRS = frozenset([
     'blib', '_build', '.bzr', '.cdv', 'cover_db', '__pycache__',
     'CVS', '_darcs', '~.dep', '~.dot', '.git', '.hg', '~.nib',
     '.pc', '~.plst', 'RCS', 'SCCS', '_sgbak', '.svn', '.tox',
-    '.metadata', '.cover'])
+    '.metadata', '.cover', '.Rproj.user', '.Rhistory', 'node_modules'])
 
-IGNORED_FILE_PATTERNS = set([r'~$', r'#.+#$', r'[._].*\.swp$', r'core\.\d+$'])
+IGNORED_FILE_PATTERNS = frozenset(
+    [r'~$', r'#.+#$', r'[._].*\.swp$', r'core\.\d+$'])
 
 
 class PssOnlyFindFilesOption:
@@ -177,7 +203,8 @@ def pss_run(roots,
         remove_ignored_dirs=[],
         recurse=True,
         textonly=False,
-        type_pattern=None, # for -G and -g
+        include_patterns=[], # for -G and -g
+        exclude_patterns=[],
         include_types=[],  # empty means all known types are included
         exclude_types=[],
         ignore_case=False,
@@ -193,7 +220,9 @@ def pss_run(roots,
         do_break=True,
         do_heading=True,
         prefix_filename_to_file_matches=True,
+        show_line_of_match=True,
         show_column_of_first_match=False,
+        universal_newlines=False,
         ncontext_before=0,
         ncontext_after=0,
         ):
@@ -207,7 +236,6 @@ def pss_run(roots,
         Returns True if a match was found, False otherwise.
     """
     # Set up a default output formatter, if none is provided
-    #
     if output_formatter is None:
         output_formatter = DefaultPssOutputFormatter(
             do_colors=do_colors,
@@ -216,10 +244,10 @@ def pss_run(roots,
             lineno_color_str=lineno_color_str,
             do_heading=do_heading,
             prefix_filename_to_file_matches=prefix_filename_to_file_matches,
+            show_line_of_match=show_line_of_match,
             show_column_of_first_match=show_column_of_first_match)
 
     # Set up the FileFinder
-    #
     if search_all_files_and_dirs:
         ignore_dirs = set()
     else:
@@ -231,11 +259,15 @@ def pss_run(roots,
     ignore_extensions = set()
     search_patterns = set()
     ignore_patterns = set()
-    filter_include_patterns = set()
-    filter_exclude_patterns = set()
+    # include_patterns (-g/-G) is an AND filter to the search criteria
+    filter_include_patterns = set(include_patterns)
+    filter_exclude_patterns = set(exclude_patterns)
 
-    if not search_all_files_and_dirs and not search_all_types:
-        filter_exclude_patterns = IGNORED_FILE_PATTERNS
+    if search_all_files_and_dirs or search_all_types:
+        # Don't apply restrictions
+        pass
+    else:
+        filter_exclude_patterns |= set(IGNORED_FILE_PATTERNS)
 
         for typ in (include_types or TYPE_MAP):
             search_extensions.update(TYPE_MAP[typ].extensions)
@@ -244,13 +276,6 @@ def pss_run(roots,
         for typ in exclude_types:
             ignore_extensions.update(TYPE_MAP[typ].extensions)
             ignore_patterns.update(TYPE_MAP[typ].patterns)
-    else:
-        # all files are searched
-        pass
-
-    # type_pattern (-g/-G) is an AND filter to the search criteria
-    if type_pattern is not None:
-        filter_include_patterns.add(type_pattern)
 
     filefinder = FileFinder(
             roots=roots,
@@ -267,10 +292,14 @@ def pss_run(roots,
     # Set up the content matcher
     #
 
-    if pattern is None:
-        pattern = b''
+    if universal_newlines:
+        if pattern is None:
+            pattern = ''
     else:
-        pattern = str2bytes(pattern)
+        if pattern is None:
+            pattern = b''
+        else:
+            pattern = str2bytes(pattern)
 
     if (    not ignore_case and
             (smart_case and not _pattern_has_uppercase(pattern))):
@@ -304,7 +333,8 @@ def pss_run(roots,
         # full work.
         #
         try:
-            with open(filepath, 'rb') as fileobj:
+            openmode = 'rU' if universal_newlines else 'rb'
+            with open(filepath, openmode) as fileobj:
                 if not istextfile(fileobj):
                     # istextfile does some reading on fileobj, so rewind it
                     fileobj.seek(0)
